@@ -1,3 +1,10 @@
+"""
+Plotting functions for DKL predictions and training data.
+
+@author: Ganesh Narasimha
+
+"""
+
 import os
 import numpy as np
 import torch
@@ -6,7 +13,21 @@ import matplotlib.pyplot as plt
 
 
 def plot_train_series(train_indices, orig_params, score):
-
+    """
+    Plot time series of training parameters and scores.
+    
+    Creates a 5-panel plot showing the variation of F1, F2, Pressure, Temperature,
+    and Score for the training data indices.
+    
+    Args:
+        train_indices (array-like): Indices of training data points to plot
+        orig_params (torch.Tensor or numpy.ndarray): Original parameter matrix with shape (n, 4)
+                                                    where columns are [F1, F2, P, T]
+        score (torch.Tensor): Score values with shape (n, 1) corresponding to training data
+    
+    Returns:
+        None: Displays the plot using matplotlib
+    """
     if torch.is_tensor(orig_params):
         orig_params = orig_params.detach().numpy()
 
@@ -42,7 +63,20 @@ def plot_train_series(train_indices, orig_params, score):
 
 
 def plot_train_hist(train_indices, orig_params):
-
+    """
+    Plot histograms of training parameters.
+    
+    Creates a 4-panel histogram plot showing the distribution of F1, F2, 
+    Pressure, and Temperature for the training data indices.
+    
+    Args:
+        train_indices (array-like): Indices of training data points to plot
+        orig_params (torch.Tensor or numpy.ndarray): Original parameter matrix with shape (n, 4)
+                                                    where columns are [F1, F2, P, T]
+    
+    Returns:
+        None: Displays the plot using matplotlib
+    """
     if torch.is_tensor(orig_params):
         orig_params = orig_params.detach().numpy()
 
@@ -75,7 +109,23 @@ def plot_train_hist(train_indices, orig_params):
 
 
 def plot_mean_map(y_means, train_indices, orig_params, score):
-
+    """
+    Plot 2D parameter space maps showing predicted means and training data.
+    
+    Creates a 2x3 subplot grid showing scatter plots of parameter pairs (T-P, F1-P, F2-P,
+    F1-T, F2-T, F2-F1) colored by predicted mean values, with training data overlaid
+    in a different colormap.
+    
+    Args:
+        y_means (array-like): Predicted mean values for all data points
+        train_indices (array-like): Indices of training data points
+        orig_params (torch.Tensor or numpy.ndarray): Original parameter matrix with shape (n, 4)
+                                                    where columns are [F1, F2, P, T]
+        score (torch.Tensor): Score values corresponding to training data
+    
+    Returns:
+        None: Displays the plot using matplotlib
+    """
     F1 = orig_params[:,0]
     F2 = orig_params[:,1]
     P = orig_params[:,2]
@@ -125,7 +175,26 @@ def plot_mean_map(y_means, train_indices, orig_params, score):
 
 
 def plot_GP_mean(y_means, orig_params, params_grid, train_params, y_train):
-
+    """
+    Plot Gaussian Process mean predictions on a grid with training data overlay.
+    
+    Creates a 2x3 subplot grid showing scatter plots of parameter pairs (T-P, F1-P, F2-P,
+    F1-T, F2-T, F2-F1) colored by GP mean predictions, with training data points overlaid.
+    The function handles denormalization of parameters from [0,1] range back to original scale.
+    
+    Args:
+        y_means (torch.Tensor): GP mean predictions for grid points
+        orig_params (torch.Tensor or numpy.ndarray): Original parameter matrix for scaling reference
+                                                    with shape (n, 4) where columns are [F1, F2, P, T]
+        params_grid (torch.Tensor or numpy.ndarray): Grid parameter values in normalized [0,1] range
+                                                    with shape (m, 4)
+        train_params (torch.Tensor or numpy.ndarray): Training parameter values in normalized [0,1] range
+                                                     with shape (k, 4)
+        y_train (torch.Tensor): Training target values with shape (k, 1)
+    
+    Returns:
+        None: Displays the plot using matplotlib
+    """
     if torch.is_tensor(orig_params):
         orig_params = orig_params.detach().numpy()
 

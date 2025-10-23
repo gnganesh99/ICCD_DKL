@@ -46,7 +46,10 @@ from Plot_DKL_predictions import plot_GP_mean
 # Fitting of the GP model with the help of the base kernel
 
 class SimpleGP(ExactGP, GPyTorchModel):
-       # to inform GPyTorchModel API
+    """
+    Simple Gaussian Process model using GPyTorch.
+
+    """
 
     def __init__(self, train_X, train_Y, kernel = 'RBF', likelihood = GaussianLikelihood()):
 
@@ -88,545 +91,649 @@ class SimpleGP(ExactGP, GPyTorchModel):
 
 
 def train_custom_nn_DKL(train_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.1, num_epochs = 200, precision = 'double', device = None, plot_loss = False, n_batches = 3):
+    """
+    Train a custom neural network with a Gaussian process (GP) using Deep Kernel Learning (DKL).
+    Args:
+        train_dataset (Dataset): Training dataset containing input features and target values.
+        custom_nn (torch.nn.Module): Custom neural network model to extract features.
+        lr_custom_nn (float): Learning rate for the custom neural network. Default is 0.1.
+        lr_gp (float): Learning rate for the Gaussian process. Default is 0.1.
+        num_epochs (int): Number of training epochs. Default is 200.
+        precision (str): Precision type ('double' or 'single'). Default is 'double'.
+        device (torch.device): Device to run the training on (CPU or GPU). Default is None.
+        plot_loss (bool): Whether to plot the training loss. Default is False.
+        n_batches (int): Number of batches for training. Default is 3.
+
+    Returns:
+        model (DKL_Custom_nn): Trained DKL model.
+        training_loss (list): List of training loss values for each epoch.
+
+    """
+
+
+
+    if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+            device = device
+
+
+    initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
     
-        if device is None:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-                device = device
+    train_batchsize = max(1, len(train_dataset)//n_batches)
+    train_dataloader = DataLoader(train_dataset, batch_size = train_batchsize, shuffle = True)
 
-
-        initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
+    for train_X, _, train_Y in initialize_dataloader:
+        # Load the data
+        train_X, train_Y = train_X.to(device), train_Y.to(device)
         
-        train_batchsize = max(1, len(train_dataset)//n_batches)
-        train_dataloader = DataLoader(train_dataset, batch_size = train_batchsize, shuffle = True)
+    
 
-        for train_X, _, train_Y in initialize_dataloader:
-            # Load the data
-            train_X, train_Y = train_X.to(device), train_Y.to(device)
+    #Construct the joint model
+        #Extract features from the custom_nn
+    custom_nn.to(device)
+    embeddings = custom_nn(train_X).detach() # No detach here
+
+        # Define the GP model, Embed the features
+    likelihood = GaussianLikelihood()
+    gp = SimpleGP(embeddings, train_Y.squeeze(-1), likelihood = likelihood)
+    gp.to(device)
+    
+    # Define the joint DKL model
+    model = DKL_Custom_nn(custom_nn, gp)
+    model.to(device)
+
+
+    # Define the optimizer for the joint model
+    optimizer = Adam([
+        {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn},
+        {'params': model.gp.parameters(), 'lr': lr_gp}])
+
+
+    #Register noise constraint (noise variance is always >= 0.1) to prevent degenerate solutions that may lead to overfitting
+    model.gp.likelihood.noise_covar.register_constraint("raw_noise", GreaterThan(1e-1))
+
+    # Define the loss criterion
+    mll = ExactMarginalLogLikelihood(likelihood, model.gp)
+    # mll = mll.to(train_X)
+
+
+    # set gp precision to double
+    if precision == 'double':
+        model.gp = model.gp.double()
+    elif precision == 'single':
+        model.gp = model.gp.float()
+    else:
+        raise ValueError('Precision should be either double or single')
+    
+
+    # Set the model and likelihood to training mode
+    model.train()
+
+
+    progress_bar = tqdm(total=num_epochs, desc="Training", leave=False)
+    training_loss = []
+
+    for epoch in range(num_epochs):
             
-      
+            epoch_loss = 0
+            
+            for train_X,_, train_Y in train_dataloader:
+                    
+                train_X, train_Y = train_X.to(device), train_Y.to(device)
+            
 
-        #Construct the joint model
-          #Extract features from the custom_nn
-        custom_nn.to(device)
-        embeddings = custom_nn(train_X).detach() # No detach here
+                # clear gradients
+                optimizer.zero_grad()
+                
+                # forward pass through the custom_nn to obtain the embeddings
+                embeddings = model.custom_nn(train_X)
 
-          # Define the GP model, Embed the features
-        likelihood = GaussianLikelihood()
-        gp = SimpleGP(embeddings, train_Y.squeeze(-1), likelihood = likelihood)
-        gp.to(device)
-       
-        # Define the joint DKL model
-        model = DKL_Custom_nn(custom_nn, gp)
-        model.to(device)
+                embeddings = embeddings.detach().to(device)
+
+                model.gp.set_train_data(inputs=embeddings, targets=train_Y.squeeze(-1), strict=False)
+
+                # forward pass through the model to obtain the output MultivariateNormal
+                output = model.gp(embeddings)
+
+                # calculate the loss
+                loss = -mll(output, train_Y.squeeze(-1))  # .train_targets is same as train_Y.squeeze(-1)
+                
+                epoch_loss += loss.item()/len(train_X)                  
+                
+                # back prop to compute gradients
+                loss.backward()         # use retain_graph=True if you want to reuse the computational graph during multiple loss functions
+
+                # update the parameters/weights
+                optimizer.step()
+
+                        
+            epoch_loss = epoch_loss/len(train_dataloader)
+            training_loss.append(epoch_loss)
+
+
+            # update progress bar
+            progress_bar.update(1)
+            progress_bar.set_postfix({'Loss': epoch_loss})
+
+    progress_bar.close()
     
-
-        # Define the optimizer for the joint model
-        optimizer = Adam([
-            {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn},
-            {'params': model.gp.parameters(), 'lr': lr_gp}])
-
-
-        #Register noise constraint (noise variance is always >= 0.1) to prevent degenerate solutions that may lead to overfitting
-        model.gp.likelihood.noise_covar.register_constraint("raw_noise", GreaterThan(1e-1))
-
-        # Define the loss criterion
-        mll = ExactMarginalLogLikelihood(likelihood, model.gp)
-        # mll = mll.to(train_X)
-
-
-        # set gp precision to double
-        if precision == 'double':
-            model.gp = model.gp.double()
-        elif precision == 'single':
-            model.gp = model.gp.float()
-        else:
-            raise ValueError('Precision should be either double or single')
+    model.eval()
+    
+    if plot_loss:
+        plt.figure(figsize = (4,4))
+        plt.plot(training_loss)
+        plt.ylabel("Epoch loss")
+        plt.xlabel("Epochs")
+        plt.show()
         
 
-        # Set the model and likelihood to training mode
-        model.train()
-
-
-        progress_bar = tqdm(total=num_epochs, desc="Training", leave=False)
-        training_loss = []
-
-        for epoch in range(num_epochs):
-                
-                epoch_loss = 0
-                
-                for train_X,_, train_Y in train_dataloader:
-                     
-                    train_X, train_Y = train_X.to(device), train_Y.to(device)
-                
-
-                    # clear gradients
-                    optimizer.zero_grad()
-                    
-                    # forward pass through the custom_nn to obtain the embeddings
-                    embeddings = model.custom_nn(train_X)
-
-                    embeddings = embeddings.detach().to(device)
-
-                    model.gp.set_train_data(inputs=embeddings, targets=train_Y.squeeze(-1), strict=False)
-
-                    # forward pass through the model to obtain the output MultivariateNormal
-                    output = model.gp(embeddings)
-
-                    # calculate the loss
-                    loss = -mll(output, train_Y.squeeze(-1))  # .train_targets is same as train_Y.squeeze(-1)
-                    
-                    epoch_loss += loss.item()/len(train_X)                  
-                    
-                    # back prop to compute gradients
-                    loss.backward()         # use retain_graph=True if you want to reuse the computational graph during multiple loss functions
-
-                    # update the parameters/weights
-                    optimizer.step()
-
-                            
-                epoch_loss = epoch_loss/len(train_dataloader)
-                training_loss.append(epoch_loss)
-
-
-                # update progress bar
-                progress_bar.update(1)
-                progress_bar.set_postfix({'Loss': epoch_loss})
-
-        progress_bar.close()
-        
-        model.eval()
-        
-        if plot_loss:
-            plt.figure(figsize = (4,4))
-            plt.plot(training_loss)
-            plt.ylabel("Epoch loss")
-            plt.xlabel("Epochs")
-            plt.show()
-         
-
-        return model, training_loss
+    return model, training_loss
 
 
 def train_mixed_nn_DKL(train_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.1, num_epochs = 200, precision = 'double', device = None, plot_loss = False, n_batches = 3, weight_decay = 0):
     
-        if device is None:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-                device = device
+    """
+    Train a custom mixed neural network with additional parameters alongside a Gaussian process (GP) using Deep Kernel Learning (DKL).
 
-        initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
+    Args:
+        train_dataset (Dataset): Training dataset containing input features, additional parameters, and target values.
+        custom_nn (torch.nn.Module): Custom neural network model to extract features.
+        lr_custom_nn (float): Learning rate for the custom neural network. Default is 0.1.
+        lr_gp (float): Learning rate for the Gaussian process. Default is 0.1.
+        num_epochs (int): Number of training epochs. Default is 200.
+        precision (str): Precision type ('double' or 'single'). Default is 'double'.
+        device (torch.device): Device to run the training on (CPU or GPU). Default is None.
+        plot_loss (bool): Whether to plot the training loss. Default is False.
+        n_batches (int): Number of batches for training. Default is 3.
+        weight_decay (float): Weight decay (L2 regularization) for the optimizer. Default is 0.
+
+    Returns:
+        model (DKL_Custom_nn): Trained DKL model.
+        training_loss (list): List of training loss values for each epoch.
+    """
+
+
+    if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+            device = device
+
+    initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
+    
+    train_batchsize = max(1, len(train_dataset)//n_batches)
+    train_dataloader = DataLoader(train_dataset, batch_size = train_batchsize, shuffle = True)
+
+    for train_X, train_params, train_Y in initialize_dataloader:             
+        # Load the data
+        train_X, train_params, train_Y = train_X.to(device), train_params.to(device), train_Y.to(device)
         
-        train_batchsize = max(1, len(train_dataset)//n_batches)
-        train_dataloader = DataLoader(train_dataset, batch_size = train_batchsize, shuffle = True)
-
-        for train_X, train_params, train_Y in initialize_dataloader:             
-            # Load the data
-            train_X, train_params, train_Y = train_X.to(device), train_params.to(device), train_Y.to(device)
-            
-      
-
-        #Construct the joint model
-          #Extract features from the custom_nn
-        custom_nn.to(device)
-        embeddings = custom_nn(train_X, train_params).to(device) 
-          # Define the GP model, Embed the features
-        likelihood = GaussianLikelihood()
-        gp = SimpleGP(embeddings, train_Y.squeeze(-1), likelihood = likelihood) #.squeeze(-1) to match with gp.train_targets
-        gp.to(device)
-       
-        # Define the joint DKL model
-        model = DKL_Custom_nn(custom_nn, gp)
-        model.to(device)
     
 
-        # Define the optimizer for the joint model
-        optimizer = Adam([
-            {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn, 'weight_decay': weight_decay},
-            {'params': model.gp.parameters(), 'lr': lr_gp, 'weight_decay': weight_decay}])
+    #Construct the joint model
+        #Extract features from the custom_nn
+    custom_nn.to(device)
+    embeddings = custom_nn(train_X, train_params).to(device) 
+        # Define the GP model, Embed the features
+    likelihood = GaussianLikelihood()
+    gp = SimpleGP(embeddings, train_Y.squeeze(-1), likelihood = likelihood) #.squeeze(-1) to match with gp.train_targets
+    gp.to(device)
+    
+    # Define the joint DKL model
+    model = DKL_Custom_nn(custom_nn, gp)
+    model.to(device)
 
 
-        #Register noise constraint (noise variance is always >= 0.1) to prevent degenerate solutions that may lead to overfitting
-        model.gp.likelihood.noise_covar.register_constraint("raw_noise", GreaterThan(1e-1))
-
-        # Define the loss criterion
-        mll = ExactMarginalLogLikelihood(likelihood, model.gp)
-        mll = mll.to(device)
+    # Define the optimizer for the joint model
+    optimizer = Adam([
+        {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn, 'weight_decay': weight_decay},
+        {'params': model.gp.parameters(), 'lr': lr_gp, 'weight_decay': weight_decay}])
 
 
-        # set gp precision to double
-        if precision == 'double':
-            model.gp = model.gp.double()
-        elif precision == 'single':
-            model.gp = model.gp.float()
-        else:
-            raise ValueError('Precision should be either double or single')
-        
+    #Register noise constraint (noise variance is always >= 0.1) to prevent degenerate solutions that may lead to overfitting
+    model.gp.likelihood.noise_covar.register_constraint("raw_noise", GreaterThan(1e-1))
 
-        # Set the model and likelihood to training mode
-        model.train()
+    # Define the loss criterion
+    mll = ExactMarginalLogLikelihood(likelihood, model.gp)
+    mll = mll.to(device)
 
 
-        progress_bar = tqdm(total=num_epochs, desc="Training", leave=False)
-        training_loss = []
+    # set gp precision to double
+    if precision == 'double':
+        model.gp = model.gp.double()
+    elif precision == 'single':
+        model.gp = model.gp.float()
+    else:
+        raise ValueError('Precision should be either double or single')
+    
 
-        for epoch in range(num_epochs):
+    # Set the model and likelihood to training mode
+    model.train()
+
+
+    progress_bar = tqdm(total=num_epochs, desc="Training", leave=False)
+    training_loss = []
+
+    for epoch in range(num_epochs):
+            
+            epoch_loss = 0
+            for train_X, train_params, train_Y in train_dataloader:
+                    
+                train_X, train_params, train_Y = train_X.to(device), train_params.to(device), train_Y.to(device)
+
+                # clear gradients
+                optimizer.zero_grad()
                 
-                epoch_loss = 0
-                for train_X, train_params, train_Y in train_dataloader:
-                        
-                    train_X, train_params, train_Y = train_X.to(device), train_params.to(device), train_Y.to(device)
-
-                    # clear gradients
-                    optimizer.zero_grad()
-                    
-                    # forward pass through the custom_nn to obtain the embeddings
-                    embeddings = model.custom_nn(train_X, train_params).to(device)
-                    
-                    #Reinitialize the model with the new embeddings. strict=False allows to set train data while retaining kernel hyperparameters
-                    #train_Y.squeeze(-1), to match with gp output (or train_targets) which has the shape (n,)
-                    model.gp.set_train_data(inputs=embeddings, targets=train_Y.squeeze(-1), strict=False)
-                    
-                    # forward pass through the model to obtain the output MultivariateNormal
-                    output = model.gp(embeddings)
-                    
-
-                    # calculate the loss
-                    loss = -mll(output, train_Y.squeeze(-1))  # model.gp.train_targets is same as train_Y.squeeze(-1)
-                    epoch_loss += loss.item()/len(train_X)
-
-                    
-                    # back prop to compute gradients
-                    loss.backward()         # use retain_graph=True if you want to reuse the computational graph during multiple loss functions
-
-                    # update the parameters/weights
-                    optimizer.step()
-               
+                # forward pass through the custom_nn to obtain the embeddings
+                embeddings = model.custom_nn(train_X, train_params).to(device)
                 
-                epoch_loss = epoch_loss/len(train_dataloader)
-                training_loss.append(epoch_loss)
+                #Reinitialize the model with the new embeddings. strict=False allows to set train data while retaining kernel hyperparameters
+                #train_Y.squeeze(-1), to match with gp output (or train_targets) which has the shape (n,)
+                model.gp.set_train_data(inputs=embeddings, targets=train_Y.squeeze(-1), strict=False)
+                
+                # forward pass through the model to obtain the output MultivariateNormal
+                output = model.gp(embeddings)
+                
+
+                # calculate the loss
+                loss = -mll(output, train_Y.squeeze(-1))  # model.gp.train_targets is same as train_Y.squeeze(-1)
+                epoch_loss += loss.item()/len(train_X)
+
+                
+                # back prop to compute gradients
+                loss.backward()         # use retain_graph=True if you want to reuse the computational graph during multiple loss functions
+
+                # update the parameters/weights
+                optimizer.step()
+            
+            
+            epoch_loss = epoch_loss/len(train_dataloader)
+            training_loss.append(epoch_loss)
 
 
-                # update progress bar
-                progress_bar.update(1)
-                progress_bar.set_postfix({'Loss': epoch_loss})
+            # update progress bar
+            progress_bar.update(1)
+            progress_bar.set_postfix({'Loss': epoch_loss})
 
 
-        progress_bar.close()
+    progress_bar.close()
+    
+    model.eval()
+    
+    if plot_loss:
+        plt.figure(figsize = (4,4))
+        plt.plot(training_loss)
+        plt.ylabel("Epoch loss")
+        plt.xlabel("Epochs")
+        plt.show()
         
-        model.eval()
-        
-        if plot_loss:
-            plt.figure(figsize = (4,4))
-            plt.plot(training_loss)
-            plt.ylabel("Epoch loss")
-            plt.xlabel("Epochs")
-            plt.show()
-         
 
-        return model, training_loss
+    return model, training_loss
 
 def train_test_custom_nn_DKL(train_dataset, test_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.1, num_epochs = 200, precision = 'double', device = None, plot_loss = False, n_batches = 3):
+
+    """
+    Train a custom mixed neural network with additional parameters alongside a Gaussian process (GP) using Deep Kernel Learning (DKL).
+
+    Args:
+        train_dataset (Dataset): Training dataset containing input features, additional parameters, and target values.
+        custom_nn (torch.nn.Module): Custom neural network model to extract features.
+        lr_custom_nn (float): Learning rate for the custom neural network. Default is 0.1.
+        lr_gp (float): Learning rate for the Gaussian process. Default is 0.1.
+        num_epochs (int): Number of training epochs. Default is 200.
+        precision (str): Precision type ('double' or 'single'). Default is 'double'.
+        device (torch.device): Device to run the training on (CPU or GPU). Default is None.
+        plot_loss (bool): Whether to plot the training loss. Default is False.
+        n_batches (int): Number of batches for training. Default is 3.
+        weight_decay (float): Weight decay (L2 regularization) for the optimizer. Default is 0.
+
+    Returns:
+        model (DKL_Custom_nn): Trained DKL model.
+        training_loss (list): List of training loss values for each epoch.
+        testing_loss (list): List of validation loss values for each epoch.
+
+    """
+
+    if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+            device = device
+
+
+    initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
     
-        if device is None:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-                device = device
-
-
-        initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
-        
-        
-        train_batchsize = max(1, len(train_dataset)//n_batches)
-        test_batchsize = max(1, len(test_dataset)//n_batches)
-        
-        train_dataloader = DataLoader(train_dataset, batch_size = train_batchsize, shuffle = True)
-        test_dataloader = DataLoader(test_dataset, batch_size = test_batchsize, shuffle = True)
-        
-        for train_X, _, train_Y in initialize_dataloader:
     
-            train_X, train_Y = train_X.to(device), train_Y.to(device)
-      
+    train_batchsize = max(1, len(train_dataset)//n_batches)
+    test_batchsize = max(1, len(test_dataset)//n_batches)
+    
+    train_dataloader = DataLoader(train_dataset, batch_size = train_batchsize, shuffle = True)
+    test_dataloader = DataLoader(test_dataset, batch_size = test_batchsize, shuffle = True)
+    
+    for train_X, _, train_Y in initialize_dataloader:
 
-        #Construct the joint model
-          #Extract features from the custom_nn
-        custom_nn.to(device)
-        embeddings = custom_nn(train_X) # No detach here
-
-          # Define the GP model, Embed the features
-        likelihood = GaussianLikelihood()
-        gp = SimpleGP(embeddings, train_Y.squeeze(-1), likelihood = likelihood)
-        gp.to(device)
-       
-        # Define the joint DKL model
-        model = DKL_Custom_nn(custom_nn, gp)
-        model.to(device)
+        train_X, train_Y = train_X.to(device), train_Y.to(device)
     
 
-        # Define the optimizer for the joint model
-        optimizer = Adam([
-            {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn},
-            {'params': model.gp.parameters(), 'lr': lr_gp}])
+    #Construct the joint model
+        #Extract features from the custom_nn
+    custom_nn.to(device)
+    embeddings = custom_nn(train_X) # No detach here
+
+        # Define the GP model, Embed the features
+    likelihood = GaussianLikelihood()
+    gp = SimpleGP(embeddings, train_Y.squeeze(-1), likelihood = likelihood)
+    gp.to(device)
+    
+    # Define the joint DKL model
+    model = DKL_Custom_nn(custom_nn, gp)
+    model.to(device)
 
 
-        #Register noise constraint (noise variance is always >= 0.1) to prevent degenerate solutions that may lead to overfitting
-        model.gp.likelihood.noise_covar.register_constraint("raw_noise", GreaterThan(1e-1))
-
-        # Define the loss criterion
-        mll = ExactMarginalLogLikelihood(likelihood, model.gp)
-        mll = mll.to(device)
+    # Define the optimizer for the joint model
+    optimizer = Adam([
+        {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn},
+        {'params': model.gp.parameters(), 'lr': lr_gp}])
 
 
-        # set gp precision to double
-        if precision == 'double':
-            model.gp = model.gp.double()
-        elif precision == 'single':
-            model.gp = model.gp.float()
-        else:
-            raise ValueError('Precision should be either double or single')
-        
+    #Register noise constraint (noise variance is always >= 0.1) to prevent degenerate solutions that may lead to overfitting
+    model.gp.likelihood.noise_covar.register_constraint("raw_noise", GreaterThan(1e-1))
 
-        
+    # Define the loss criterion
+    mll = ExactMarginalLogLikelihood(likelihood, model.gp)
+    mll = mll.to(device)
 
 
-        progress_bar = tqdm(total=num_epochs, desc="Training", leave=False)
-        training_loss = []
-        testing_loss = []
+    # set gp precision to double
+    if precision == 'double':
+        model.gp = model.gp.double()
+    elif precision == 'single':
+        model.gp = model.gp.float()
+    else:
+        raise ValueError('Precision should be either double or single')
+    
 
-        for epoch in range(num_epochs):
+    
+
+
+    progress_bar = tqdm(total=num_epochs, desc="Training", leave=False)
+    training_loss = []
+    testing_loss = []
+
+    for epoch in range(num_epochs):
+            
+            #Training the model
+            epoch_loss = 0
+            
+            for train_X, _, train_Y in train_dataloader:
+
+                train_X, train_Y = train_X.to(device), train_Y.to(device)
+            
+                # Set the model and likelihood to training mode
+                model.train()
+
+                # clear gradients
+                optimizer.zero_grad()
                 
-                #Training the model
-                epoch_loss = 0
+                # forward pass through the custom_nn to obtain the embeddings
+                embeddings = model.custom_nn(train_X)
+
+                embeddings = embeddings.to(device)
+
+                model.gp.set_train_data(inputs=embeddings, targets=train_Y.squeeze(-1), strict=False)
+
+                # forward pass through the model to obtain the output MultivariateNormal
+                output = model.gp(embeddings)
+
+                # calculate the loss. MLL loss is additive, so average it over the batch size
+                train_loss = -mll(output, train_Y.squeeze(-1)) # .train_targets is same as train_Y.squeeze(-1 )   
                 
-                for train_X, _, train_Y in train_dataloader:
-
-                    train_X, train_Y = train_X.to(device), train_Y.to(device)
+                epoch_loss += train_loss.item()/len(train_X)             
                 
-                    # Set the model and likelihood to training mode
-                    model.train()
+                # back prop to compute gradients
+                train_loss.backward()         # use retain_graph=True if you want to reuse the computational graph during multiple loss functions
 
-                    # clear gradients
-                    optimizer.zero_grad()
-                    
-                    # forward pass through the custom_nn to obtain the embeddings
-                    embeddings = model.custom_nn(train_X)
+                # update the parameters/weights
+                optimizer.step()
 
-                    embeddings = embeddings.to(device)
+            epoch_loss = epoch_loss/len(train_dataloader)
+            training_loss.append(epoch_loss)
 
-                    model.gp.set_train_data(inputs=embeddings, targets=train_Y.squeeze(-1), strict=False)
 
-                    # forward pass through the model to obtain the output MultivariateNormal
-                    output = model.gp(embeddings)
+            #Testing the model
+            test_loss = 0
 
-                    # calculate the loss. MLL loss is additive, so average it over the batch size
-                    train_loss = -mll(output, train_Y.squeeze(-1)) # .train_targets is same as train_Y.squeeze(-1 )   
-                    
-                    epoch_loss += train_loss.item()/len(train_X)             
-                    
-                    # back prop to compute gradients
-                    train_loss.backward()         # use retain_graph=True if you want to reuse the computational graph during multiple loss functions
+            for test_X, _, test_Y in test_dataloader:
 
-                    # update the parameters/weights
-                    optimizer.step()
-
-                epoch_loss = epoch_loss/len(train_dataloader)
-                training_loss.append(epoch_loss)
+                test_X, test_Y = test_X.to(device), test_Y.to(device)
 
 
                 #Testing the model
-                test_loss = 0
+                model.eval()
 
-                for test_X, _, test_Y in test_dataloader:
+                output = model.predict(test_X)
 
-                    test_X, test_Y = test_X.to(device), test_Y.to(device)
+                test_loss += -mll(output, test_Y.squeeze(-1)).item()/len(test_X)
 
+                        
+            test_loss = test_loss/len(test_dataloader)
+            testing_loss.append(test_loss)
 
-                    #Testing the model
-                    model.eval()
-
-                    output = model.predict(test_X)
-
-                    test_loss += -mll(output, test_Y.squeeze(-1)).item()/len(test_X)
-
-                            
-                test_loss = test_loss/len(test_dataloader)
-                testing_loss.append(test_loss)
-
-                # update progress bar
-                progress_bar.update(1)
-                progress_bar.set_postfix({'Train Loss': epoch_loss, 'Test Loss': test_loss})
+            # update progress bar
+            progress_bar.update(1)
+            progress_bar.set_postfix({'Train Loss': epoch_loss, 'Test Loss': test_loss})
 
 
-        progress_bar.close()
+    progress_bar.close()
+    
+    
+    
+    if plot_loss:
+        plt.figure(figsize = (4,4))
+        plt.plot(training_loss, label = 'Train Loss')
+        plt.plot(testing_loss, label = 'Test Loss')
+        plt.ylabel("Epoch loss")
+        plt.xlabel("Epochs")
+        plt.legend()
+        plt.show()
         
-        
-        
-        if plot_loss:
-            plt.figure(figsize = (4,4))
-            plt.plot(training_loss, label = 'Train Loss')
-            plt.plot(testing_loss, label = 'Test Loss')
-            plt.ylabel("Epoch loss")
-            plt.xlabel("Epochs")
-            plt.legend()
-            plt.show()
-         
 
-        return model, training_loss, testing_loss
+    return model, training_loss, testing_loss
 
 
 def train_test_mixed_nn_DKL(train_dataset, test_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.1, num_epochs = 200, precision = 'double', device = None, plot_loss = False, n_batches = 3, weight_decay = 0):
+    """
+
+   Train a custom mixed neural network with additional parameters alongside a Gaussian process (GP) using Deep Kernel Learning (DKL).
+   Args:
+       train_dataset (Dataset): Training dataset containing input features, additional parameters, and target values.
+       test_dataset (Dataset): Testing dataset containing input features, additional parameters, and target values.
+       custom_nn (torch.nn.Module): Custom neural network model to extract features.
+       lr_custom_nn (float): Learning rate for the custom neural network. Default is 0.1.
+       lr_gp (float): Learning rate for the Gaussian process. Default is 0.1.
+       num_epochs (int): Number of training epochs. Default is 200.
+       precision (str): Precision type ('double' or 'single'). Default is 'double'.
+       device (torch.device): Device to run the training on (CPU or GPU). Default is None.
+       plot_loss (bool): Whether to plot the training loss. Default is False.
+       n_batches (int): Number of batches for training. Default is 3.
+       weight_decay (float): Weight decay (L2 regularization) for the optimizer. Default is 0.
+
+    Returns:
+       model (torch.nn.Module): Trained model.
+       training_loss (list): List of training loss values.
+       testing_loss (list): List of validation loss values.
+   """
+
+
+
+
+    if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+            device = device
+
     
-        if device is None:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-                device = device
+    initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
+    train_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset)//n_batches, shuffle = True)
+    test_dataloader = DataLoader(test_dataset, batch_size = len(test_dataset)//n_batches, shuffle = True)
+    
+
+    for train_X, train_params, train_Y in initialize_dataloader:
+        # Load the data to the device
+        train_X, train_params, train_Y = train_X.to(device), train_params.to(device), train_Y.to(device)
+    
+
 
         
-        initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
-        train_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset)//n_batches, shuffle = True)
-        test_dataloader = DataLoader(test_dataset, batch_size = len(test_dataset)//n_batches, shuffle = True)
-        
+    
 
-        for train_X, train_params, train_Y in initialize_dataloader:
-            # Load the data to the device
-            train_X, train_params, train_Y = train_X.to(device), train_params.to(device), train_Y.to(device)
-      
+    #Construct the joint model
+        #Extract features from the custom_nn
+    custom_nn.to(device)
+    embeddings = custom_nn(train_X, train_params).to(device) 
+        # Define the GP model, Embed the features
+    likelihood = GaussianLikelihood()
+    gp = SimpleGP(embeddings, train_Y.squeeze(-1), likelihood = likelihood) #.squeeze(-1) to match with gp.train_targets
+    gp.to(device)
+    
+    # Define the joint DKL model
+    model = DKL_Custom_nn(custom_nn, gp)
+    model.to(device)
 
+
+    # Define the optimizer for the joint model
+    optimizer = Adam([
+        {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn, 'weight_decay':weight_decay},
+        {'params': model.gp.parameters(), 'lr': lr_gp, 'weight_decay':weight_decay}])
+
+
+    #Register noise constraint (noise variance is always >= 0.1) to prevent degenerate solutions that may lead to overfitting
+    model.gp.likelihood.noise_covar.register_constraint("raw_noise", GreaterThan(1e-1))
+
+    # Define the loss criterion
+    mll = ExactMarginalLogLikelihood(likelihood, model.gp)
+    mll = mll.to(device)
+
+
+    # set gp precision to double
+    if precision == 'double':
+        model.gp = model.gp.double()
+    elif precision == 'single':
+        model.gp = model.gp.float()
+    else:
+        raise ValueError('Precision should be either double or single')
+    
+    
+
+
+    progress_bar = tqdm(total=num_epochs, desc="Training", leave=False)
+    training_loss = []
+    testing_loss = []
+
+    for epoch in range(num_epochs):
+            
+            #Training the model
+            epoch_loss = 0
+            for train_X, train_params, train_Y in train_dataloader:
+                    
+                train_X, train_params, train_Y = train_X.to(device), train_params.to(device), train_Y.to(device)
 
             
-      
+                # Set the model to training mode
+                model.train()
 
-        #Construct the joint model
-          #Extract features from the custom_nn
-        custom_nn.to(device)
-        embeddings = custom_nn(train_X, train_params).to(device) 
-          # Define the GP model, Embed the features
-        likelihood = GaussianLikelihood()
-        gp = SimpleGP(embeddings, train_Y.squeeze(-1), likelihood = likelihood) #.squeeze(-1) to match with gp.train_targets
-        gp.to(device)
-       
-        # Define the joint DKL model
-        model = DKL_Custom_nn(custom_nn, gp)
-        model.to(device)
+                # clear gradients
+                optimizer.zero_grad()
+                
+                # forward pass through the custom_nn to obtain the embeddings
+                embeddings = model.custom_nn(train_X, train_params) #.to(device)
+                
+                #Reinitialize the model with the new embeddings. strict=False allows to set train data while retaining kernel hyperparameters
+                #train_Y.squeeze(-1), to match with gp output (or train_targets) which has the shape (n,)
+                model.gp.set_train_data(inputs=embeddings, targets=train_Y.squeeze(-1), strict=False)
+                
+                # forward pass through the model to obtain the output MultivariateNormal
+                output = model.gp(embeddings)
+                
+
+                # calculate the loss
+                train_loss = -mll(output, train_Y.squeeze(-1))  # model.gp.train_targets is same as train_Y.squeeze(-1)
+                
+                epoch_loss += train_loss.item()/len(train_X)
+
+                
+
+                
+                # back prop to compute gradients
+                train_loss.backward()         # use retain_graph=True if you want to reuse the computational graph during multiple loss functions
+
+                # update the parameters/weights
+                optimizer.step()
+
+            epoch_loss = epoch_loss/len(train_dataloader)
+            training_loss.append(epoch_loss)
+
+
+
+            #Testing the model
+            test_loss = 0
+
+
+            for test_X, test_params, test_Y in test_dataloader:
+                    
+                test_X, test_params, test_Y = test_X.to(device), test_params.to(device), test_Y.to(device)
+
+                #progress_bar.close()
+        
+                model.eval()
+                
+                output = model.predict(test_X, test_params)
+                test_loss += -mll(output, test_Y.squeeze(-1)).item()/len(test_X)
+
+            test_loss = test_loss/len(test_dataloader)
+            testing_loss.append(test_loss)
+
+
+            # update progress bar
+            progress_bar.update(1)
+            progress_bar.set_postfix({'Training Loss': epoch_loss, 'Test Loss': test_loss})
+
+    progress_bar.close()
+
+
+
     
+    
+    if plot_loss:
+        plt.figure(figsize = (4,4))
+        plt.plot(training_loss, label = 'Train Loss')
+        plt.plot(testing_loss, label = 'Test Loss')
+        plt.ylabel("Epoch loss")
+        plt.xlabel("Epochs")
+        plt.legend()
+        plt.show()
 
-        # Define the optimizer for the joint model
-        optimizer = Adam([
-            {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn, 'weight_decay':weight_decay},
-            {'params': model.gp.parameters(), 'lr': lr_gp, 'weight_decay':weight_decay}])
-
-
-        #Register noise constraint (noise variance is always >= 0.1) to prevent degenerate solutions that may lead to overfitting
-        model.gp.likelihood.noise_covar.register_constraint("raw_noise", GreaterThan(1e-1))
-
-        # Define the loss criterion
-        mll = ExactMarginalLogLikelihood(likelihood, model.gp)
-        mll = mll.to(device)
-
-
-        # set gp precision to double
-        if precision == 'double':
-            model.gp = model.gp.double()
-        elif precision == 'single':
-            model.gp = model.gp.float()
-        else:
-            raise ValueError('Precision should be either double or single')
-        
-       
-
-
-        progress_bar = tqdm(total=num_epochs, desc="Training", leave=False)
-        training_loss = []
-        testing_loss = []
-
-        for epoch in range(num_epochs):
-                
-                #Training the model
-                epoch_loss = 0
-                for train_X, train_params, train_Y in train_dataloader:
-                     
-                    train_X, train_params, train_Y = train_X.to(device), train_params.to(device), train_Y.to(device)
-
-                
-                    # Set the model to training mode
-                    model.train()
-
-                    # clear gradients
-                    optimizer.zero_grad()
-                    
-                    # forward pass through the custom_nn to obtain the embeddings
-                    embeddings = model.custom_nn(train_X, train_params) #.to(device)
-                    
-                    #Reinitialize the model with the new embeddings. strict=False allows to set train data while retaining kernel hyperparameters
-                    #train_Y.squeeze(-1), to match with gp output (or train_targets) which has the shape (n,)
-                    model.gp.set_train_data(inputs=embeddings, targets=train_Y.squeeze(-1), strict=False)
-                    
-                    # forward pass through the model to obtain the output MultivariateNormal
-                    output = model.gp(embeddings)
-                    
-
-                    # calculate the loss
-                    train_loss = -mll(output, train_Y.squeeze(-1))  # model.gp.train_targets is same as train_Y.squeeze(-1)
-                    
-                    epoch_loss += train_loss.item()/len(train_X)
-
-                    
-
-                    
-                    # back prop to compute gradients
-                    train_loss.backward()         # use retain_graph=True if you want to reuse the computational graph during multiple loss functions
-
-                    # update the parameters/weights
-                    optimizer.step()
-
-                epoch_loss = epoch_loss/len(train_dataloader)
-                training_loss.append(epoch_loss)
-
-
-
-                #Testing the model
-                test_loss = 0
-
-
-                for test_X, test_params, test_Y in test_dataloader:
-                     
-                    test_X, test_params, test_Y = test_X.to(device), test_params.to(device), test_Y.to(device)
-
-                    #progress_bar.close()
-            
-                    model.eval()
-                    
-                    output = model.predict(test_X, test_params)
-                    test_loss += -mll(output, test_Y.squeeze(-1)).item()/len(test_X)
-
-                test_loss = test_loss/len(test_dataloader)
-                testing_loss.append(test_loss)
-
-
-                # update progress bar
-                progress_bar.update(1)
-                progress_bar.set_postfix({'Training Loss': epoch_loss, 'Test Loss': test_loss})
-
-        progress_bar.close()
-
-
-
-        
-        
-        if plot_loss:
-            plt.figure(figsize = (4,4))
-            plt.plot(training_loss, label = 'Train Loss')
-            plt.plot(testing_loss, label = 'Test Loss')
-            plt.ylabel("Epoch loss")
-            plt.xlabel("Epochs")
-            plt.legend()
-            plt.show()
-
-        return model, training_loss, testing_loss
+    return model, training_loss, testing_loss
 
 
 def train_GPR(train_X, train_Y, precision = 'double', learning_rate = 0.1, num_epochs = 200, device = None, 
               model = None, plot_loss = False):
+    
+    """
+    Train a Gaussian Process Regression (GPR) model using GPyTorch.
+    Args:
+        train_X (torch.Tensor): Training input features.
+        train_Y (torch.Tensor): Training target values.
+        precision (str): Precision type ('double' or 'single'). Default is 'double'.
+        learning_rate (float): Learning rate for the optimizer. Default is 0.1.
+        num_epochs (int): Number of training epochs. Default is 200.
+        device (torch.device): Device to run the training on (CPU or GPU). Default is None.
+        model (gpytorch.models.ExactGP): Predefined GP model. If None, a SimpleGP model will be used. Default is None.
+        plot_loss (bool): Whether to plot the training loss. Default is False.
+    Returns:
+        gp_model (gpytorch.models.ExactGP): Trained GPR model.
+        training_loss (list): List of training loss values for each epoch.
+
+    """
 
     # Define the device for training
     if device is None:
@@ -716,6 +823,22 @@ def train_GPR(train_X, train_Y, precision = 'double', learning_rate = 0.1, num_e
 
 
 def parameter_mapping(train_params, train_y, orig_parameters, param_divs = [10, 10, 10, 10], plot_GP = False, num_epochs = 10):
+    """
+    Train a Gaussian Process Regression (GPR) model on the provided training parameters and target values, and map the parameters to the GPR model's input space.
+    Args:
+        train_params (torch.Tensor): Training input parameters.
+        train_y (torch.Tensor): Training target values.
+        orig_parameters (pd.DataFrame): Original parameters for plotting.
+        param_divs (list): Number of divisions for each parameter in the grid space. Default is [10, 10, 10, 10].
+        plot_GP (bool): Whether to plot the GP mean. Default is False.
+        num_epochs (int): Number of training epochs for the GPR model. Default is 10.
+    Returns:
+        y_means (torch.Tensor): Predicted mean values from the GPR model.
+        y_vars (torch.Tensor): Predicted variance values from the GPR model.
+        param_grid (np.ndarray): Grid of parameters used for prediction.
+    
+    """
+
 
     device = "cuda" if torch.cuda.is_available() else 'cpu'
 
@@ -747,6 +870,16 @@ def parameter_mapping(train_params, train_y, orig_parameters, param_divs = [10, 
 
 
 def vae_loss_mse(output, train_spectra, beta_elbo = 1e-3):
+
+    """
+    Compute the VAE loss using Mean Squared Error (MSE) for reconstruction loss and KL divergence for regularization.
+    Args:
+        output (tuple): Tuple containing predicted spectra, mean (mu), and log variance (logvar).
+        train_spectra (torch.Tensor): Ground truth spectra for training.
+        beta_elbo (float): Weight for the KL divergence term in the loss. Default is 1e-3.
+    Returns:
+        loss (torch.Tensor): Computed VAE loss.
+    """
     
     pred_spectra, mu, logvar = output  
     
@@ -765,7 +898,17 @@ def DKL_posterior(model, X_space, params = None, num_tasks = 1):
     Calculate the posterior mean and variance of the DKL model
     To use posterior function, the gp_model should be inherited from GPyTorchModel
 
-    params is the additional parameters that are required for the mixed_nn models
+
+    Args: 
+        model (DKL_Custom_nn): Trained DKL model.
+        X_space (torch.Tensor): Input space for prediction.
+        params (torch.Tensor, optional): Additional parameters for mixed_nn models. Default is None.
+        num_tasks (int): Number of output tasks. Default is 1.
+
+    Returns:
+        y_pred_means (torch.Tensor): Predicted mean values.
+        y_pred_vars (torch.Tensor): Predicted variance values.
+
     """
     
     
@@ -827,6 +970,16 @@ def veDKL_posterior(model, X_space, params = None):
     To use posterior function, the gp_model should be inherited from GPyTorchModel
 
     params is the additional parameters that are required for the mixed_nn models
+
+    Args: 
+        model (DKL_Custom_nn): Trained DKL model.
+        X_space (torch.Tensor): Input space for prediction.
+        params (torch.Tensor, optional): Additional parameters for mixed_nn models. Default is None.
+    Returns:
+        y_pred_means (torch.Tensor): Predicted mean values.
+        y_pred_vars (torch.Tensor): Predicted variance values.
+        latent_embeddings (torch.Tensor): Latent embeddings from the neural network.
+
     """
     
     # move the model and the data to the device.
@@ -892,6 +1045,14 @@ def GP_posterior(model, X_space):
     """
     Calculate the posterior mean and variance of the GP model
     To use posterior function, the gp_model should be inherited from GPyTorchModel
+
+    Args:
+        model (gpytorch.models.ExactGP): Trained GP model.
+        X_space (torch.Tensor): Input space for prediction.
+    
+    Returns:    
+        y_pred_means (torch.Tensor): Predicted mean values.
+        y_pred_vars (torch.Tensor): Predicted variance values.
 
     """
     # move the model and the data to the device.
@@ -991,6 +1152,24 @@ def norm_0to1(arr):
 
 def acq_fn_EI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = [], sample_next_points = 1):
 
+    """
+    Calculate the expected improvement (EI) acquisition function.
+
+    Args:
+        y_means (torch.Tensor): Predicted mean values from the GP model.
+        y_vars (torch.Tensor): Predicted variance values from the GP model.
+        train_Y_norm (torch.Tensor): Normalized training target values.
+        eta (float): Exploration parameter. Default is 0.01.
+        index_exclude (list): List of indices to exclude from consideration. Default is [].
+        sample_next_points (int): Number of next points to sample. Default is 1.
+    Returns:
+        acq_ind (np.ndarray): Indices of the maximum acquisition function values.
+        acq_val_max (np.ndarray): Maximum acquisition function values.
+        Acq_vals (np.ndarray): Acquisition function values for all points.
+    
+    """
+
+
     y_means = y_means.squeeze().detach().numpy()
     y_vars = y_vars.squeeze().detach().numpy()
     y_std_dev = np.sqrt(y_vars)
@@ -1042,6 +1221,22 @@ def acq_fn_EI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = [], sam
 
 
 def acq_fn_PI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = [], sample_next_points = 1):
+    """
+    Calculate the Probability of Improvement (PI) acquisition function.
+
+    Args:
+        y_means (torch.Tensor): Predicted mean values from the GP model.
+        y_vars (torch.Tensor): Predicted variance values from the GP model.
+        train_Y_norm (torch.Tensor): Normalized training target values. 
+        eta (float): Exploration parameter. Default is 0.01.
+        index_exclude (list): List of indices to exclude from consideration. Default is [].
+        sample_next_points (int): Number of next points to sample. Default is 1.
+    Returns:
+        acq_ind (np.ndarray): Indices of the maximum acquisition function values.
+        acq_val_max (np.ndarray): Maximum acquisition function values.
+        Acq_vals (np.ndarray): Acquisition function values for all points.
+
+    """
 
     y_means = y_means.squeeze().detach().numpy()
     y_vars = y_vars.squeeze().detach().numpy()
@@ -1098,6 +1293,21 @@ def acq_fn_PI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = [], sam
 
 
 def acq_fn_UCB(y_means, y_vars, beta = 1, index_exclude = [], sample_next_points = 1):
+    """
+    Calculate the Upper Confidence Bound (UCB) acquisition function.
+    Args:
+        y_means (torch.Tensor): Predicted mean values from the GP model.    
+        y_vars (torch.Tensor): Predicted variance values from the GP model.
+        beta (float): Exploration parameter. Default is 1.
+        index_exclude (list): List of indices to exclude from consideration. Default is [].
+        sample_next_points (int): Number of next points to sample. Default is 1.
+
+    Returns:
+        acq_ind (np.ndarray): Indices of the maximum acquisition function values.
+        acq_val_max (np.ndarray): Maximum acquisition function values.
+        Acq_vals (np.ndarray): Acquisition function values for all points.    
+    
+    """
 
     y_means = y_means.squeeze().detach().numpy()
     y_vars = y_vars.squeeze().detach().numpy()
