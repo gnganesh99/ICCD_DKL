@@ -1,3 +1,6 @@
+
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -128,6 +131,7 @@ class CNN_FeatureExtractor(nn.Module):
 
     """
     CNN feature extractor
+    Assumes input images of size (N, 1, 40, 40)
     """
 
     def __init__(self):
@@ -161,6 +165,7 @@ class RCNN_FeatureExtractor(nn.Module):
 
     """
     Recurrent CNN feature extractor
+    Assumes input images of size (batch_size, seq_len, 1, 40, 40)
 
     """
 
@@ -197,7 +202,8 @@ class RCNN_FeatureExtractor(nn.Module):
 class LSTMCNN_FeatureExtractor(nn.Module):
 
     """
-    Recurrent CNN feature extractor
+    LSTM CNN feature extractor
+    Assumes input images of size (batch_size, seq_len, 1, 40, 40)
 
     """
 
@@ -234,7 +240,8 @@ class LSTMCNN_FeatureExtractor(nn.Module):
 class Mixed_RCNN_FeatureExtractor(nn.Module):
 
     """
-    Recurrent CNN feature extractor
+    Mixed RCNN feature extractor
+    Assumes input images of size (batch_size, seq_len, 1, 40, 40)
 
     """
 
@@ -293,7 +300,8 @@ class Mixed_RCNN_FeatureExtractor(nn.Module):
 class Mixed_LSTM_FeatureExtractor(nn.Module):
 
     """
-    Recurrent CNN feature extractor
+    Mixed LSTM-CNN feature extractor
+    Assumes input images of size (batch_size, seq_len, 1, 40, 40)
 
     """
 
@@ -352,7 +360,8 @@ class Mixed_LSTM_FeatureExtractor(nn.Module):
 class VE_Mixed_RCNN_FeatureExtractor(nn.Module):
 
     """
-    Recurrent CNN feature extractor
+    Variational-Encoded RCNN feature extractor
+    Assumes input images of size (batch_size, seq_len, 1, 40, 40)
 
     """
 
@@ -426,7 +435,8 @@ class VE_Mixed_RCNN_FeatureExtractor(nn.Module):
 class VE_Mixed_LSTMCNN_FeatureExtractor(nn.Module):
 
     """
-    Recurrent CNN feature extractor
+    Variational-Encoded LSTM CNN feature extractor
+    Assumes input images of size (batch_size, seq_len, 1, 40, 40)
 
     """
 
@@ -581,6 +591,12 @@ class DKL_VE_Custom_nn(nn.Module):
     
 
 class ICCDNet(nn.Module):
+
+    """
+    ICCD imaging feature extractor using 2+1D convolutions - 3D convolutions split into spatial and temporal convolutions
+    Assumes input images of size (batch_size,1, seq_len, 40, 40)
+    """
+
     def __init__(self,l1=64,l2=32, output_dim = 3):
         super(ICCDNet, self).__init__()
         # ICCD imaging feature inputs, the full image size is BATCH,C,frames,H,W where it is N,50,40,40
@@ -635,6 +651,12 @@ class ICCDNet(nn.Module):
 
 
 class MixedICCDNet(nn.Module):
+    """
+    Mixed ICCD imaging and parameter feature extractor using 2+1D convolutions -
+    Assumes input images of size (batch_size,1, seq_len, 40, 40)
+    """
+
+
     def __init__(self, output_dim = 3, l1=64,l2=32,param_l1=48,param_out=32,c1=16,c2=24,c3=32):
 
         super(MixedICCDNet, self).__init__()
