@@ -62,9 +62,11 @@ class ICCDDataset(Dataset):
             idx = idx.tolist()
 
         iccd_images = self.iccd_3Dimages[idx]
+        iccd_images = norm_0to1(iccd_images) # we are normalizing here, not above!
         params = self.params[idx]
         score = self.score[idx]
 
+        
         iccd_images = torch.tensor(iccd_images).float()
 
         if self.image_for_rcnn == True:
@@ -169,10 +171,11 @@ def extract_data(df, norm = False):
 
 
 
-def growth_params(df):
+def get_growth_params(datafile, norm = False):
     """
     Extracts growth parameters and returns them as a numpy array: [s0, s1, J]
     """
+    df = load_df(datafile)
 
     df_dict = df.to_dict()
     growth_params = []
@@ -184,7 +187,16 @@ def growth_params(df):
         growth_params.append(np.array([vals, s1[key], J[key]]))
 
     growth_params = np.array(growth_params)
+
+    if norm:
+        for i in range(growth_params.shape[1]):
+            growth_params[:, i] = norm_0to1(growth_params[:, i]) 
+        growth_params = np.array(growth_params)
+
+    growth_params = torch.tensor(growth_params).float()
+        
     return growth_params
+
 
 
 class AddGaussianNoise():
@@ -215,7 +227,7 @@ class AddGaussianNoise():
 
 
 def norm_0to1(arr):
-    arr = np.array(arr)
+    arr = np.asarray(arr)
     return (arr - arr.min())/(arr.max() - arr.min())
 
 

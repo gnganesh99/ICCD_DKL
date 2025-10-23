@@ -80,8 +80,12 @@ class DKL_Custom_nn(nn.Module):
 
         return self
 
+    
+    
 
 
+    
+    
 
 class SimpleCNN(nn.Module):
 
@@ -187,6 +191,43 @@ class RCNN_FeatureExtractor(nn.Module):
         # Use the output from the last time step
         output = self.fc(rnn_out[:, -1, :])  # Shape: (batch_size, 1)
         return output
+    
+    
+    
+class LSTMCNN_FeatureExtractor(nn.Module):
+
+    """
+    Recurrent CNN feature extractor
+
+    """
+
+    def __init__(self, cnn_feature_size = 32*8*8, output_dim = 3):
+        super().__init__()
+
+        # input shape = (N, 1, 40, 40)
+        self.cnn = CNN_FeatureExtractor()
+        self.rnn = nn.LSTM(input_size = cnn_feature_size, hidden_size = 64, num_layers = 1, batch_first = True)
+        self.fc = nn.Linear(64, output_dim)
+
+
+    def forward(self, x):
+        batch_size, seq_len, c, h, w = x.size()
+        
+        # Extract features for each image in the sequence
+        cnn_features = []
+        for t in range(seq_len):
+            cnn_out = self.cnn(x[:, t, :, :, :])  # Process each frame independently
+            cnn_features.append(cnn_out)
+        
+        # Stack CNN features into a sequence
+        cnn_features = torch.stack(cnn_features, dim=1)  # Shape: (batch_size, seq_len, feature_dim)
+        
+        # Pass the sequence of features into the RNN
+        rnn_out, final_hidden_state = self.rnn(cnn_features)  # Shape: (batch_size, seq_len, hidden_dim)
+        
+        # Use the output from the last time step
+        output = self.fc(rnn_out[:, -1, :])  # Shape: (batch_size, 1)
+        return output
         
     
 
@@ -247,8 +288,297 @@ class Mixed_RCNN_FeatureExtractor(nn.Module):
 
 
         return joint_output
+
+    
+class Mixed_LSTM_FeatureExtractor(nn.Module):
+
+    """
+    Recurrent CNN feature extractor
+
+    """
+
+    def __init__(self, cnn_feature_size = 32*8*8, output_dim = 3):
+        super().__init__()
+
+        # input shape = (N, 1, 40, 40)
+        self.cnn = CNN_FeatureExtractor()
+        self.rnn = nn.LSTM(input_size = cnn_feature_size, hidden_size = 64, num_layers = 1, batch_first = True)
+        self.fc = nn.Linear(64, 64)
+
+        self.param_fc1 = nn.Linear(4, 32)
+        self.param_fc2 = nn.Linear(32, 64)
+
+        self.join_fc1 = nn.Linear(128, 64)
+        self.join_fc2 = nn.Linear(64, 32)
+        self.join_fc3 = nn.Linear(32, output_dim)
+
+    def forward(self, x, params):
+        batch_size, seq_len, c, h, w = x.size()
+        
+        # Extract features for each image in the sequence
+        cnn_features = []
+        for t in range(seq_len):
+            cnn_out = self.cnn(x[:, t, :, :, :])  # Process each frame independently
+            cnn_features.append(cnn_out)
+        
+        # Stack CNN features into a sequence
+        cnn_features = torch.stack(cnn_features, dim=1)  # Shape: (batch_size, seq_len, feature_dim)
+        
+        # Pass the sequence of features into the RNN
+        rnn_out, final_hidden_state = self.rnn(cnn_features)  # Shape: (batch_size, seq_len, hidden_dim)
+        
+        # Use the output from the last time step
+        rcnn_out = self.fc(rnn_out[:, -1, :])  # Shape: (batch_size, output_dim)
+        rcnn_out = F.relu(rcnn_out)
+        rcnn_out = rcnn_out.view(batch_size, -1)
+
+        # Process the parameters
+        y = F.relu(self.param_fc1(params))
+        y = F.dropout(y, p=0.1, training=self.training)
+        y = F.relu(self.param_fc2(y))
+        y = y.view(batch_size, -1)
+
+
+        # Concatenate the RCNN and parameter features
+        joint = torch.cat([rcnn_out, y], dim=1)        
+        joint = F.leaky_relu(self.join_fc1(joint), 0.2, inplace=True)
+        joint = F.leaky_relu(self.join_fc2(joint), 0.1, inplace=True)
+        joint_output = self.join_fc3(joint)
+
+
+        return joint_output
+    
+
+class VE_Mixed_RCNN_FeatureExtractor(nn.Module):
+
+    """
+    Recurrent CNN feature extractor
+
+    """
+
+    def __init__(self, cnn_feature_size = 32*8*8, output_dim = 3):
+        super().__init__()
+
+        # input shape = (N, 1, 40, 40)
+        self.cnn = CNN_FeatureExtractor()
+        self.rnn = nn.RNN(input_size = cnn_feature_size, hidden_size = 64, num_layers = 1, batch_first = True)
+        self.fc = nn.Linear(64, 64)
+
+        self.param_fc1 = nn.Linear(4, 32)
+        self.param_fc2 = nn.Linear(32, 64)
+
+        self.join_fc1 = nn.Linear(128, 64)
+        self.join_fc2 = nn.Linear(64, 32)
+
+        self.join_fc3_mu = nn.Linear(32, output_dim)
+        self.join_fc3_logvar = nn.Linear(32, output_dim)
+
+    def forward(self, x, params):
+        batch_size, seq_len, c, h, w = x.size()
+        
+        # Extract features for each image in the sequence
+        cnn_features = []
+        for t in range(seq_len):
+            cnn_out = self.cnn(x[:, t, :, :, :])  # Process each frame independently
+            cnn_features.append(cnn_out)
+        
+        # Stack CNN features into a sequence
+        cnn_features = torch.stack(cnn_features, dim=1)  # Shape: (batch_size, seq_len, feature_dim)
+        
+        # Pass the sequence of features into the RNN
+        rnn_out, final_hidden_state = self.rnn(cnn_features)  # Shape: (batch_size, seq_len, hidden_dim)
+        
+        # Use the output from the last time step
+        rcnn_out = self.fc(rnn_out[:, -1, :])  # Shape: (batch_size, output_dim)
+        rcnn_out = F.relu(rcnn_out)
+        rcnn_out = rcnn_out.view(batch_size, -1)
+
+        # Process the parameters
+        y = F.relu(self.param_fc1(params))
+        y = F.dropout(y, p=0.1, training=self.training)
+        y = F.relu(self.param_fc2(y))
+        y = y.view(batch_size, -1)
+
+
+        # Concatenate the RCNN and parameter features
+        joint = torch.cat([rcnn_out, y], dim=1)        
+        joint = F.leaky_relu(self.join_fc1(joint), 0.2, inplace=True)
+        joint = F.leaky_relu(self.join_fc2(joint), 0.1, inplace=True)
+
+        mu = self.join_fc3_mu(joint)
+        logvar = self.join_fc3_logvar(joint)     
+        
+        # Re-parametrization        
+        
+        # Standard deviation: calculated through logvar for numerical stability
+        std = torch.exp(0.5 * logvar)
+        
+        #sample coefficients from a normal distribution in range [0, 1]
+        eps = torch.randn_like(std)
+        
+        #latent layer
+        latent = mu + eps * std
+
+        return latent, mu, logvar
         
 
+        
+class VE_Mixed_LSTMCNN_FeatureExtractor(nn.Module):
+
+    """
+    Recurrent CNN feature extractor
+
+    """
+
+    def __init__(self, cnn_feature_size = 32*8*8, output_dim = 3):
+        super().__init__()
+
+        # input shape = (N, 1, 40, 40)
+        self.cnn = CNN_FeatureExtractor()
+        self.rnn = nn.LSTM(input_size = cnn_feature_size, hidden_size = 64, num_layers = 1, batch_first = True)
+        self.fc = nn.Linear(64, 64)
+
+        self.param_fc1 = nn.Linear(4, 32)
+        self.param_fc2 = nn.Linear(32, 64)
+
+        self.join_fc1 = nn.Linear(128, 64)
+        self.join_fc2 = nn.Linear(64, 32)
+
+        self.join_fc3_mu = nn.Linear(32, output_dim)
+        self.join_fc3_logvar = nn.Linear(32, output_dim)
+
+    def forward(self, x, params):
+        batch_size, seq_len, c, h, w = x.size()
+        
+        # Extract features for each image in the sequence
+        cnn_features = []
+        for t in range(seq_len):
+            cnn_out = self.cnn(x[:, t, :, :, :])  # Process each frame independently
+            cnn_features.append(cnn_out)
+        
+        # Stack CNN features into a sequence
+        cnn_features = torch.stack(cnn_features, dim=1)  # Shape: (batch_size, seq_len, feature_dim)
+        
+        # Pass the sequence of features into the RNN
+        rnn_out, final_hidden_state = self.rnn(cnn_features)  # Shape: (batch_size, seq_len, hidden_dim)
+        
+        # Use the output from the last time step
+        rcnn_out = self.fc(rnn_out[:, -1, :])  # Shape: (batch_size, output_dim)
+        rcnn_out = F.relu(rcnn_out)
+        rcnn_out = rcnn_out.view(batch_size, -1)
+
+        # Process the parameters
+        y = F.relu(self.param_fc1(params))
+        y = F.dropout(y, p=0.1, training=self.training)
+        y = F.relu(self.param_fc2(y))
+        y = y.view(batch_size, -1)
+
+
+        # Concatenate the RCNN and parameter features
+        joint = torch.cat([rcnn_out, y], dim=1)        
+        joint = F.leaky_relu(self.join_fc1(joint), 0.2, inplace=True)
+        joint = F.leaky_relu(self.join_fc2(joint), 0.1, inplace=True)
+
+        mu = self.join_fc3_mu(joint)
+        logvar = self.join_fc3_logvar(joint)     
+        
+        # Re-parametrization        
+        
+        # Standard deviation: calculated through logvar for numerical stability
+        std = torch.exp(0.5 * logvar)
+        
+        #sample coefficients from a normal distribution in range [0, 1]
+        eps = torch.randn_like(std)
+        
+        #latent layer
+        latent = mu + eps * std
+
+        return latent, mu, logvar
+        
+    
+class DKL_VE_Custom_nn(nn.Module):
+    """
+    Combines a custom neural network with a Gaussian process layer.
+    The neural network can be eiher a CNN or a MLP
+    The output of the neural network is considered as the embeding into the GP layer
+
+    Input: 
+    - custom_nn: neural network model
+    - gp: Gaussian process model (ex: SimpleGP layer)
+ 
+    """
+
+    def __init__(self, custom_nn, gp):
+        super().__init__()
+
+        self.custom_nn = custom_nn
+
+        self.gp = gp
+
+
+
+    def forward(self, x, y = None):
+
+        # y are the additional params for mixed models
+        if y is not None:
+
+            latent, mu, logvar = self.custom_nn(x, y)
+        else:
+            latent, mu, logvar = self.custom_nn(x)
+
+        return self.gp(latent), mu, logvar
+
+
+    def predict(self, x, y = None):
+        
+        self.gp.eval()
+        self.gp.likelihood.eval()
+        self.custom_nn.eval()
+
+        with torch.no_grad():
+            prediction, _, _ = self.forward(x, y)        
+            
+        return prediction
+    
+    def posterior(self, x, y = None):
+            
+        self.gp.eval()
+        self.gp.likelihood.eval()
+        self.custom_nn.eval()
+
+        with torch.no_grad():
+            prediction = self.predict(x, y)
+
+            mean = prediction.mean
+            var = prediction.variance  
+        
+        mean.unsqueeze_(-1)
+        var.unsqueeze_(-1)
+
+        return mean, var
+   
+    def train(self):
+
+        self.gp.train()
+        self.gp.likelihood.train() 
+        self.custom_nn.train()
+
+    def eval(self):
+
+        self.gp.eval()
+        self.gp.likelihood.eval()
+        self.custom_nn.eval()
+
+    def to(self, device):
+        self.gp.to(device)
+        self.gp.likelihood.to(device)
+        self.custom_nn.to(device)
+
+        return self
+    
+    
+    
+    
 
 class ICCDNet(nn.Module):
     def __init__(self,l1=64,l2=32, output_dim = 3):

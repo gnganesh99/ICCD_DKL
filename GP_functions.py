@@ -1,5 +1,8 @@
-# GP functions
+"""
+Gaussian Process functions for training and prediction using GPyTorch and BoTorch
 
+Author: Ganesh Narasimha
+"""
 import matplotlib.pylab as plt
 import numpy as np
 
@@ -34,6 +37,8 @@ from scipy.stats import norm
 
 from custom_models import DKL_Custom_nn, SimpleCNN
 from torch.utils.data import DataLoader, Dataset
+
+import torch.nn.functional as F
 
 from Plot_DKL_predictions import plot_GP_mean
 
@@ -91,7 +96,9 @@ def train_custom_nn_DKL(train_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.
 
 
         initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
-        train_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset)//n_batches, shuffle = True)
+        
+        train_batchsize = max(1, len(train_dataset)//n_batches)
+        train_dataloader = DataLoader(train_dataset, batch_size = train_batchsize, shuffle = True)
 
         for train_X, _, train_Y in initialize_dataloader:
             # Load the data
@@ -201,7 +208,7 @@ def train_custom_nn_DKL(train_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.
         return model, training_loss
 
 
-def train_mixed_nn_DKL(train_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.1, num_epochs = 200, precision = 'double', device = None, plot_loss = False, n_batches = 3):
+def train_mixed_nn_DKL(train_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.1, num_epochs = 200, precision = 'double', device = None, plot_loss = False, n_batches = 3, weight_decay = 0):
     
         if device is None:
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -209,7 +216,9 @@ def train_mixed_nn_DKL(train_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.1
                 device = device
 
         initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
-        train_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset)//n_batches, shuffle = True)
+        
+        train_batchsize = max(1, len(train_dataset)//n_batches)
+        train_dataloader = DataLoader(train_dataset, batch_size = train_batchsize, shuffle = True)
 
         for train_X, train_params, train_Y in initialize_dataloader:             
             # Load the data
@@ -233,8 +242,8 @@ def train_mixed_nn_DKL(train_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.1
 
         # Define the optimizer for the joint model
         optimizer = Adam([
-            {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn},
-            {'params': model.gp.parameters(), 'lr': lr_gp}])
+            {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn, 'weight_decay': weight_decay},
+            {'params': model.gp.parameters(), 'lr': lr_gp, 'weight_decay': weight_decay}])
 
 
         #Register noise constraint (noise variance is always >= 0.1) to prevent degenerate solutions that may lead to overfitting
@@ -326,8 +335,13 @@ def train_test_custom_nn_DKL(train_dataset, test_dataset, custom_nn, lr_custom_n
 
 
         initialize_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset), shuffle = False)
-        train_dataloader = DataLoader(train_dataset, batch_size = len(train_dataset)//n_batches, shuffle = True)
-        test_dataloader = DataLoader(test_dataset, batch_size = len(test_dataset)//n_batches, shuffle = True)
+        
+        
+        train_batchsize = max(1, len(train_dataset)//n_batches)
+        test_batchsize = max(1, len(test_dataset)//n_batches)
+        
+        train_dataloader = DataLoader(train_dataset, batch_size = train_batchsize, shuffle = True)
+        test_dataloader = DataLoader(test_dataset, batch_size = test_batchsize, shuffle = True)
         
         for train_X, _, train_Y in initialize_dataloader:
     
@@ -460,7 +474,7 @@ def train_test_custom_nn_DKL(train_dataset, test_dataset, custom_nn, lr_custom_n
         return model, training_loss, testing_loss
 
 
-def train_test_mixed_nn_DKL(train_dataset, test_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.1, num_epochs = 200, precision = 'double', device = None, plot_loss = False, n_batches = 3):
+def train_test_mixed_nn_DKL(train_dataset, test_dataset, custom_nn, lr_custom_nn = 0.1, lr_gp = 0.1, num_epochs = 200, precision = 'double', device = None, plot_loss = False, n_batches = 3, weight_decay = 0):
     
         if device is None:
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -498,8 +512,8 @@ def train_test_mixed_nn_DKL(train_dataset, test_dataset, custom_nn, lr_custom_nn
 
         # Define the optimizer for the joint model
         optimizer = Adam([
-            {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn},
-            {'params': model.gp.parameters(), 'lr': lr_gp}])
+            {'params': model.custom_nn.parameters(), 'lr': lr_custom_nn, 'weight_decay':weight_decay},
+            {'params': model.gp.parameters(), 'lr': lr_gp, 'weight_decay':weight_decay}])
 
 
         #Register noise constraint (noise variance is always >= 0.1) to prevent degenerate solutions that may lead to overfitting
@@ -611,7 +625,8 @@ def train_test_mixed_nn_DKL(train_dataset, test_dataset, custom_nn, lr_custom_nn
         return model, training_loss, testing_loss
 
 
-def train_GPR(train_X, train_Y, precision = 'double', learning_rate = 0.1, num_epochs = 200, device = None, model = None):
+def train_GPR(train_X, train_Y, precision = 'double', learning_rate = 0.1, num_epochs = 200, device = None, 
+              model = None, plot_loss = False):
 
     # Define the device for training
     if device is None:
@@ -687,8 +702,17 @@ def train_GPR(train_X, train_Y, precision = 'double', learning_rate = 0.1, num_e
     gp_model.eval()
     gp_model.likelihood.eval()
 
+    training_loss = np.asarray(training_loss)
+    
+    if plot_loss:
+            plt.figure(figsize = (4,4))
+            plt.plot(training_loss, label = 'Train Loss')
+            plt.ylabel("Epoch loss")
+            plt.xlabel("Epochs")
+            plt.legend()
+            plt.show()
 
-    return gp_model, np.asarray(training_loss)
+    return gp_model, training_loss
 
 
 def parameter_mapping(train_params, train_y, orig_parameters, param_divs = [10, 10, 10, 10], plot_GP = False, num_epochs = 10):
@@ -722,8 +746,81 @@ def parameter_mapping(train_params, train_y, orig_parameters, param_divs = [10, 
     return y_means, y_vars, param_grid
 
 
+def vae_loss_mse(output, train_spectra, beta_elbo = 1e-3):
+    
+    pred_spectra, mu, logvar = output  
+    
+    # Reconstruction Loss (Mean Squared Error)
+    recon_loss = F.mse_loss(pred_spectra, train_spectra, reduction='mean')
 
-def DKL_posterior(model, X_space, params = None):
+    # KL Divergence Loss (Regularization)
+    kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+
+    return recon_loss + beta_elbo*kl_loss
+
+
+def DKL_posterior(model, X_space, params = None, num_tasks = 1):
+
+    """
+    Calculate the posterior mean and variance of the DKL model
+    To use posterior function, the gp_model should be inherited from GPyTorchModel
+
+    params is the additional parameters that are required for the mixed_nn models
+    """
+    
+    
+    # move the model and the data to the device.
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    model.to(device)
+    
+    model.eval()
+    
+    X_space = X_space.to(device)
+
+    if params is not None:
+        params = params.to(device)
+
+    
+    # Initialize the shape of the predictions
+    y_pred_means = torch.empty(len(X_space), num_tasks)
+    
+    y_pred_vars = torch.empty(len(X_space), num_tasks)
+    
+    t_X = torch.empty_like((X_space[0]))
+    
+    t_X = t_X.unsqueeze(0)
+    
+    
+    for t in range(0, len(X_space)):
+    
+        with torch.no_grad(), gpt.settings.max_lanczos_quadrature_iterations(32), \
+            gpt.settings.fast_computations(covar_root_decomposition=False, log_prob=False,
+                                                      solves=True), \
+            gpt.settings.max_cg_iterations(100), \
+            gpt.settings.max_preconditioner_size(80), \
+            gpt.settings.num_trace_samples(128):
+
+                t_X = X_space[t:t+1]
+                t_X.to(device)
+
+                if params is not None:
+                    t_params = params[t:t+1]
+                    t_params = t_params.to(device)
+                    predict_embeddings = model.custom_nn(t_X, t_params)
+                
+                else:
+                    predict_embeddings = model.custom_nn(t_X)
+                
+                y_predictions = model.gp.posterior(predict_embeddings)
+
+                y_pred_means[t] = y_predictions.mean
+                y_pred_vars[t] = y_predictions.variance
+
+    return y_pred_means, y_pred_vars
+
+
+def veDKL_posterior(model, X_space, params = None):
 
     """
     Calculate the posterior mean and variance of the DKL model
@@ -754,6 +851,8 @@ def DKL_posterior(model, X_space, params = None):
     
     t_X = t_X.unsqueeze(0)
     
+    latent_embeddings_list = []
+    
     
     for t in range(0, len(X_space)):
     
@@ -770,16 +869,20 @@ def DKL_posterior(model, X_space, params = None):
                 if params is not None:
                     t_params = params[t:t+1]
                     t_params = t_params.to(device)
-                    predict_embeddings = model.custom_nn(t_X, t_params)
+                    predict_embeddings, _, _ = model.custom_nn(t_X, t_params)
                 
                 else:
-                    predict_embeddings = model.custom_nn(t_X)
+                    predict_embeddings, _, _ = model.custom_nn(t_X)
                 
+                latent_embeddings_list.append(predict_embeddings)
                 y_predictions = model.gp.posterior(predict_embeddings)
                 y_pred_means[t, 0] = y_predictions.mean
                 y_pred_vars[t, 0] = y_predictions.variance
-
-    return y_pred_means, y_pred_vars
+               
+            
+    latent_embeddings = torch.cat(latent_embeddings_list, dim = 0)        
+                    
+    return y_pred_means, y_pred_vars, latent_embeddings
 
 
 
@@ -886,7 +989,7 @@ def norm_0to1(arr):
 
 
 
-def acq_fn_EI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = []):
+def acq_fn_EI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = [], sample_next_points = 1):
 
     y_means = y_means.squeeze().detach().numpy()
     y_vars = y_vars.squeeze().detach().numpy()
@@ -925,17 +1028,20 @@ def acq_fn_EI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = []):
     # Eliminate evaluated samples from consideration to avoid repeatation in future sampling
     Acq_vals[index_exclude] = -1          # setting it to -1 would render the acq value very low.
 
-    # Get the maximum value of the acquisition function
-    acq_val_max = Acq_vals.max()
-
+    
     # Get the index of the maximum value of the acquisition function
-    acq_ind = [k for (k, j) in enumerate(Acq_vals) if j == acq_val_max]
+    acq_ind = np.argsort(Acq_vals)[::-1][:sample_next_points]
+    
+    # Get the maximum value of the acquisition function
+    acq_val_max = Acq_vals[acq_ind]
+
+
 
 
     return acq_ind, acq_val_max, Acq_vals
 
 
-def acq_fn_PI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = []):
+def acq_fn_PI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = [], sample_next_points = 1):
 
     y_means = y_means.squeeze().detach().numpy()
     y_vars = y_vars.squeeze().detach().numpy()
@@ -974,12 +1080,14 @@ def acq_fn_PI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = []):
     # Eliminate evaluated samples from consideration to avoid repeatation in future sampling
     Acq_vals[index_exclude] = -1          # setting it to -1 would render the acq value very low.
 
-    # Get the maximum value of the acquisition function
-    acq_val_max = Acq_vals.max()
-
+    
+    
     # Get the index of the maximum value of the acquisition function
-    acq_ind = [k for (k, j) in enumerate(Acq_vals) if j == acq_val_max]
-
+    acq_ind = np.argsort(Acq_vals)[::-1][:sample_next_points]
+    
+    # Get the maximum value of the acquisition function
+    acq_val_max = Acq_vals[acq_ind]
+    
 
     return acq_ind, acq_val_max, Acq_vals
 
@@ -989,7 +1097,7 @@ def acq_fn_PI(y_means, y_vars, train_Y_norm, eta = 0.01, index_exclude = []):
 
 
 
-def acq_fn_UCB(y_means, y_vars, beta = 1, index_exclude = []):
+def acq_fn_UCB(y_means, y_vars, beta = 1, index_exclude = [], sample_next_points = 1):
 
     y_means = y_means.squeeze().detach().numpy()
     y_vars = y_vars.squeeze().detach().numpy()
@@ -1016,13 +1124,13 @@ def acq_fn_UCB(y_means, y_vars, beta = 1, index_exclude = []):
     # Eliminate evaluated samples from consideration to avoid repeatation in future sampling
     Acq_vals[index_exclude] = -1          # setting it to -1 would render the acq value very low.
 
-    # Get the maximum value of the acquisition function
-    acq_val_max = Acq_vals.max()
-
+    
     # Get the index of the maximum value of the acquisition function
-    acq_ind = [k for (k, j) in enumerate(Acq_vals) if j == acq_val_max]
-
-
+    acq_ind = np.argsort(Acq_vals)[::-1][:sample_next_points]
+    
+    # Get the maximum value of the acquisition function
+    acq_val_max = Acq_vals[acq_ind]
+    
     return acq_ind, acq_val_max, Acq_vals
 
 
